@@ -1,0 +1,146 @@
+<!doctype html>
+
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Kindle-Friendly Messenger</title>
+  <style>
+    :root{font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif}
+    body{margin:0;padding:12px;background:#fff;color:#000;line-height:1.4}
+    header{margin-bottom:10px}
+    h1{font-size:20px;margin:0 0 6px 0}
+    p{margin:4px 0}
+    #chat{border:1px solid #333;padding:8px;height:55vh;overflow:auto;background:#fff}
+    .msg{padding:6px 4px;border-bottom:1px dashed #ddd}
+    .meta{font-size:12px;color:#444}
+    .own{background:#f3f3f3}
+    form{display:flex;gap:6px;margin-top:8px}
+    input[type=text]{flex:1;padding:8px;font-size:16px}
+    button{padding:8px 10px;font-size:15px}
+    #controls{display:flex;gap:8px;align-items:center;margin-top:8px}
+    small.note{display:block;margin-top:6px;color:#333}
+    @media (max-width:420px){h1{font-size:18px}input[type=text]{font-size:14px}button{font-size:14px}}
+  </style>
+</head>
+<body>
+  <header>
+    <h1>📖 Kindle Messenger</h1>
+    <p>Lightweight messaging for e-readers & old browsers. Works via simple HTTP polling.</p>
+  </header><label for="name">Display name (optional)</label> <input id="name" type="text" placeholder="Your name (will show beside messages)" />
+
+  <div id="chat" aria-live="polite"></div>  <form id="sendForm">
+    <input id="text" type="text" placeholder="Type your message..." autocomplete="off" />
+    <button type="submit">Send</button>
+  </form>  <div id="controls">
+    <button id="refreshBtn" type="button">Refresh</button>
+    <button id="downloadBtn" type="button">Download chat</button>
+    <label style="margin-left:auto; font-size:13px">Poll: <select id="pollSelect"><option value="3000">3s</option><option value="5000" selected>5s</option><option value="10000">10s</option></select></label>
+  </div>
+  <small class="note">Tip: On Kindle, use the browser menu to reload if the chat seems stale. Keep messages short for best performance.</small><script>
+const FIREBASE_DB_URL = 'https://ketuu-ac1b1-default-rtdb.asia-southeast1.firebasedatabase.app'; // Correct region-specific database URL
+
+let POLL_INTERVAL = 5000;
+const CHAT_PATH = '/messages';
+
+const chatEl = document.getElementById('chat');
+const sendForm = document.getElementById('sendForm');
+const textInput = document.getElementById('text');
+const nameInput = document.getElementById('name');
+const refreshBtn = document.getElementById('refreshBtn');
+const downloadBtn = document.getElementById('downloadBtn');
+const pollSelect = document.getElementById('pollSelect');
+
+function safe(s){ return String(s||'').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function timeFmt(ts){ const d = new Date(ts); return d.toLocaleString(); }
+
+async function fetchMessages(){
+  try{
+    // Removed orderBy query for compatibility without index
+    const url = FIREBASE_DB_URL + CHAT_PATH + '.json';
+    const res = await fetch(url, {cache:'no-store'});
+    if(!res.ok) throw new Error('Network response not ok');
+    const data = await res.json();
+    return data || {};
+  }catch(e){
+    console.warn('fetchMessages error', e);
+    return {};
+  }
+}
+
+async function postMessage(payload){
+  try{
+    const url = FIREBASE_DB_URL + CHAT_PATH + '.json';
+    const res = await fetch(url, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+    return res.ok;
+  }catch(e){
+    console.warn('postMessage error', e);
+    return false;
+  }
+}
+
+let lastRenderCount = 0;
+function renderMessages(data){
+  const items = Object.keys(data).map(k => ({key:k, ...data[k]}));
+  items.sort((a,b)=> (a.time||0) - (b.time||0));
+  if(items.length === lastRenderCount) return;
+  lastRenderCount = items.length;
+  chatEl.innerHTML = '';
+  for(const it of items){
+    const div = document.createElement('div');
+    div.className = 'msg' + ((it.name||'').toLowerCase() === (nameInput.value||'').toLowerCase() ? ' own' : '');
+    const meta = '<div class="meta">' + (safe(it.name) || 'Anonymous') + ' · ' + timeFmt(it.time||0) + '</div>';
+    const body = '<div>' + safe(it.text) + '</div>';
+    div.innerHTML = meta + body;
+    chatEl.appendChild(div);
+  }
+  chatEl.scrollTop = chatEl.scrollHeight;
+}
+
+let pollTimer = null;
+async function pollOnce(){
+  const data = await fetchMessages();
+  renderMessages(data);
+}
+function startPolling(){
+  stopPolling();
+  pollTimer = setInterval(pollOnce, POLL_INTERVAL);
+  pollOnce();
+}
+function stopPolling(){ if(pollTimer) clearInterval(pollTimer); pollTimer = null; }
+
+sendForm.addEventListener('submit', async function(e){
+  e.preventDefault();
+  const txt = textInput.value.trim();
+  if(!txt) return;
+  const payload = { text: txt, name: nameInput.value || 'Anonymous', time: Date.now() };
+  const ok = await postMessage(payload);
+  if(ok){ textInput.value = ''; pollOnce(); }
+  else alert('Failed to send. Check FIREBASE_DB_URL and DB rules.');
+});
+
+refreshBtn.addEventListener('click', pollOnce);
+downloadBtn.addEventListener('click', async function(){
+  const data = await fetchMessages();
+  const items = Object.keys(data).map(k=>({key:k,...data[k]})).sort((a,b)=> (a.time||0)-(b.time||0));
+  let txt = items.map(i=> (new Date(i.time||0).toLocaleString()) + ' - ' + (i.name||'Anonymous') + ': ' + i.text).join('\n');
+  const blob = new Blob([txt||''], {type:'text/plain'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = 'chat.txt';
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+});
+
+pollSelect.addEventListener('change', function(){ POLL_INTERVAL = parseInt(this.value,10) || 5000; startPolling(); });
+
+try{ if(localStorage) { nameInput.value = localStorage.getItem('km_name') || ''; nameInput.addEventListener('input', ()=> localStorage.setItem('km_name', nameInput.value)); } }catch(e){ }
+
+if(FIREBASE_DB_URL.indexOf('YOUR_PROJECT_ID') !== -1){
+  chatEl.innerHTML = '<div style="color:#900">⚠️ You must edit the FIREBASE_DB_URL variable at the top of this file and point it to your Realtime Database URL. See instructions in the top comments.</div>';
+}else{
+  startPolling();
+}
+
+</script></body>
+</html>
